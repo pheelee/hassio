@@ -3,7 +3,7 @@
     "version": "0.1.0",
     "slug": "etcd",
     "description": "distributed key-value store",
-    "arch": ["amd64", "arm64", "aarch64"],
+    "arch": ["amd64", "armv7", "aarch64"],
     "startup": "application",
     "boot": "auto",
     "image": "pheelee/hassio-addon-etcd-{arch}",
