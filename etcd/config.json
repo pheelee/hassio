@@ -1,0 +1,24 @@
+{
+    "name": "Etcd",
+    "version": "0.1.0",
+    "slug": "etcd",
+    "description": "distributed key-value store",
+    "arch": ["amd64", "arm64", "aarch64"],
+    "startup": "application",
+    "boot": "auto",
+    "image": "pheelee/hassio-addon-etcd-{arch}",
+    "ports": {
+        "2379/tcp": 2379,
+        "2380/tcp": 2380
+    },
+    "map": [],
+    "options": {
+        "loglevel": "error"
+
+    },
+    "ingress": true,
+    "panel_icon":"mdi:database",
+    "schema": {
+        "loglevel": "list(debug|panic|fatal|error|warn|info)"
+    }
+  }
