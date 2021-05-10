@@ -1,0 +1,35 @@
+{
+    "name": "Rsync Backup",
+    "version": "0.0.1",
+    "slug": "rsync_backup",
+    "description": "Transfer Hass.io backups to a remote rsync server",
+    "image": "pheelee/hassio-addon-rsync-backup-{arch}",
+    "startup": "once",
+    "boot": "manual",
+    "arch": [
+      "aarch64",
+      "amd64",
+      "armhf",
+      "armv7",
+      "i386"
+    ],
+    "map": ["backup:rw"],
+    "options": {
+      "server": "rsync-server",
+      "port": 22,
+      "directory": "~/backup-prod",
+      "rsync_args": "",
+      "username": "user",
+      "password": "password",
+      "auto_purge": 0
+    },
+    "schema": {
+      "server": "str",
+      "port": "int",
+      "directory": "str",
+      "rsync_args": "str",
+      "username": "str",
+      "password": "str",
+      "auto_purge": "int"
+    }
+  }
