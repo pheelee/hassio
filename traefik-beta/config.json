@@ -1,7 +1,7 @@
 {
-    "name": "Traefik",
+    "name": "Traefik (Beta)",
     "version": "0.5.2",
-    "slug": "traefik",
+    "slug": "traefik-beta",
     "description": "Reverse Proxy for Web Services",
     "arch": ["armv7", "aarch64", "amd64"],
     "startup": "system",
