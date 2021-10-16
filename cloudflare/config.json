@@ -1,0 +1,23 @@
+{
+    "name": "Cloudflare",
+    "version": "0.0.1",
+    "slug": "cloudflare",
+    "description": "Updates a cloudflare dns record on launch",
+    "startup": "once",
+    "boot": "manual",
+    "arch": [
+      "aarch64",
+      "amd64",
+      "armhf",
+      "armv7",
+      "i386"
+    ],
+    "map": [],
+    "options": {
+    },
+    "schema": {
+      "api_key": "str",
+      "zone": "str",
+      "record": "str"
+    }
+  }
