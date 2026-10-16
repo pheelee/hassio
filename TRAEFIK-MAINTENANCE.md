@@ -37,7 +37,8 @@ The legacy beta catalog version `0.5.2` has no corresponding source tag. A narro
 scoped migration handles that missing historical tag without changing its advertised
 version until a real replacement image is available. Other missing tags still fail.
 
-The first new stable release is planned as `v0.5.5`. Until it exists, the existing
+The first new release version is resolved by the source Release Drafter. Until a
+new release exists, the existing
 catalog versions and images remain unchanged by this PR; only missing source
 URL metadata is added to the existing entries for updater compatibility.
 
