@@ -20,7 +20,8 @@ def candidate(channel="stable"):
     return dict(channel=channel, source=updater.SOURCE, revision=SHA,
                 version=SHA[:7] if channel == "edge" else "1.0.0",
                 config={"arch": ["aarch64", "amd64"], "version": "dev", "slug": "../../escape"},
-                files={"README.md": base64.b64encode(TEMPLATE.encode()).decode()})
+                files={"README.md": base64.b64encode(TEMPLATE.encode()).decode()},
+                previous_state=updater.EMPTY_STATE, images={arch: "sha256:" + "1" * 64 for arch in updater.ARCHITECTURES})
 
 
 class FakeAPI:
@@ -87,10 +88,167 @@ class DispatchTests(unittest.TestCase):
             updater.select_channels({"inputs": {"channel": "other"}})
 
 
+class FakeImages:
+    def __init__(self, version="1.0.0"):
+        self.version = version
+
+    def __call__(self, reference, field):
+        architecture = "arm64" if "/aarch64" in reference else "amd64"
+        if field == "Image":
+            addon_arch = "aarch64" if architecture == "arm64" else "amd64"
+            return {"os": "linux", "architecture": architecture, "config": {"Labels": {
+                "org.opencontainers.image.source": f"https://github.com/{updater.SOURCE}",
+                "org.opencontainers.image.revision": SHA,
+                "org.opencontainers.image.version": self.version,
+                "io.hass.arch": addon_arch, "io.hass.version": self.version, "io.hass.type": "addon"}}}
+        platforms = [architecture] if "/amd64" in reference or "/aarch64" in reference else ["amd64", "arm64"]
+        return {"digest": "sha256:" + "3" * 64, "manifests": [
+            {"digest": "sha256:" + ("1" if arch == "amd64" else "2") * 64,
+             "platform": {"os": "linux", "architecture": arch}} for arch in platforms]}
+
+
+class ImageIdentityTests(unittest.TestCase):
+    def test_matching_combined_and_architecture_images(self):
+        with patch.object(updater, "inspect_image", side_effect=FakeImages()):
+            self.assertEqual(set(updater.verify_images("1.0.0", SHA)), {"aarch64", "amd64"})
+
+    def test_changed_revision_version_source_or_architecture_labels_rejected(self):
+        for label in ("org.opencontainers.image.revision", "org.opencontainers.image.version",
+                      "org.opencontainers.image.source", "io.hass.arch", "io.hass.type"):
+            def inspect(reference, field):
+                image = FakeImages()(reference, field)
+                if field == "Image":
+                    image["config"]["Labels"][label] = "incorrect"
+                return image
+            with self.subTest(label=label), patch.object(updater, "inspect_image", side_effect=inspect):
+                with self.assertRaisesRegex(ValueError, "labels"):
+                    updater.verify_images("1.0.0", SHA)
+
+    def test_missing_duplicate_or_unexpected_platform_rejected(self):
+        for mode in ("missing", "duplicate", "unexpected"):
+            def inspect(reference, field):
+                image = FakeImages()(reference, field)
+                if field == "Manifest":
+                    if mode == "missing":
+                        image["manifests"] = image["manifests"][:1]
+                    elif mode == "duplicate":
+                        image["manifests"].append(image["manifests"][0])
+                    else:
+                        image["manifests"][0]["platform"]["architecture"] = "arm"
+                return image
+            with self.subTest(mode=mode), patch.object(updater, "inspect_image", side_effect=inspect):
+                with self.assertRaises(ValueError):
+                    updater.verify_images("1.0.0", SHA)
+
+    def test_architecture_tag_digest_must_match_combined_image(self):
+        def inspect(reference, field):
+            image = FakeImages()(reference, field)
+            if field == "Manifest" and "/amd64" in reference:
+                image["manifests"][0]["digest"] = "sha256:" + "9" * 64
+            return image
+        with patch.object(updater, "inspect_image", side_effect=inspect):
+            with self.assertRaisesRegex(ValueError, "does not match combined"):
+                updater.verify_images("1.0.0", SHA)
+
+    def test_attestations_are_allowed_only_for_known_image_digests(self):
+        for correct in (True, False):
+            def inspect(reference, field):
+                image = FakeImages()(reference, field)
+                if field == "Manifest":
+                    image["manifests"].append({"digest": "sha256:" + "8" * 64,
+                        "platform": {"os": "unknown", "architecture": "unknown"},
+                        "annotations": {"vnd.docker.reference.type": "attestation-manifest",
+                            "vnd.docker.reference.digest": image["manifests"][0]["digest"] if correct else "bad"}})
+                return image
+            with self.subTest(correct=correct), patch.object(updater, "inspect_image", side_effect=inspect):
+                if correct:
+                    updater.verify_images("1.0.0", SHA)
+                else:
+                    with self.assertRaisesRegex(ValueError, "Attestation"):
+                        updater.verify_images("1.0.0", SHA)
+
+
+class RollbackTests(unittest.TestCase):
+    def test_stale_release_and_edge_candidates_rejected(self):
+        for channel in ("stable", "edge"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as root:
+                stale = candidate(channel)
+                current = candidate(channel)
+                current.update(revision="b" * 40, version="bbbbbbb" if channel == "edge" else "2.0.0")
+                updater.materialize([current], root)
+                target = Path(root) / updater.TARGETS[channel]
+                before = (target / "config.json").read_bytes()
+                with self.assertRaisesRegex(ValueError, "Stale candidate"):
+                    updater.materialize([stale], root)
+                self.assertEqual((target / "config.json").read_bytes(), before)
+
+    def test_fresh_candidate_cannot_downgrade_existing_release(self):
+        for channel in ("stable", "beta"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as root:
+                current = candidate(channel)
+                current["version"] = "2.0.0"
+                updater.materialize([current], root)
+                downgrade = candidate(channel)
+                downgrade["previous_state"] = updater.catalog_state(Path(root) / updater.TARGETS[channel])
+                with self.assertRaisesRegex(ValueError, "rollback"):
+                    updater.materialize([downgrade], root)
+
+    def test_semver_precedence(self):
+        ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
+                   "1.0.0-rc.2", "1.0.0-rc.10", "1.0.0", "1.0.1", "1.1.0", "2.0.0", "10.0.0"]
+        self.assertEqual(sorted(reversed(ordered), key=updater.version_key), ordered)
+        for version in ("01.0.0", "1.0.0-rc.01", "1.0.0-rc..1"):
+            with self.assertRaises(ValueError):
+                updater.version_key(version)
+
+    def test_same_version_cannot_change_revision_or_image_digest(self):
+        for field, value in (("revision", "b" * 40), ("images", {arch: "sha256:" + "9" * 64 for arch in updater.ARCHITECTURES})):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as root:
+                updater.materialize([candidate()], root)
+                replacement = candidate()
+                replacement["previous_state"] = updater.catalog_state(Path(root) / "traefik")
+                replacement[field] = value
+                with self.assertRaisesRegex(ValueError, "cannot be replaced"):
+                    updater.materialize([replacement], root)
+
+    def test_validate_every_channel_before_modifying_any(self):
+        with tempfile.TemporaryDirectory() as root:
+            current = candidate("beta")
+            current["version"] = "2.0.0"
+            updater.materialize([current], root)
+            beta = candidate("beta")
+            beta["previous_state"] = updater.catalog_state(Path(root) / "traefik-beta")
+            with self.assertRaisesRegex(ValueError, "rollback"):
+                updater.materialize([candidate(), beta], root)
+            self.assertFalse((Path(root) / "traefik").exists())
+
+    def test_repeat_with_fresh_state_is_idempotent_and_records_digests(self):
+        with tempfile.TemporaryDirectory() as root:
+            update = candidate()
+            updater.materialize([update], root)
+            publication = Path(root) / "traefik/.publication.json"
+            before = publication.read_bytes()
+            update["previous_state"] = updater.catalog_state(publication.parent)
+            updater.materialize([update], root)
+            self.assertEqual(publication.read_bytes(), before)
+            self.assertEqual(json.loads(before)["images"], update["images"])
+
+    def test_existing_catalog_entry_without_metadata_can_upgrade(self):
+        with tempfile.TemporaryDirectory() as root:
+            target = Path(root) / "traefik"
+            target.mkdir()
+            (target / "config.json").write_text(json.dumps({"version": "0.5.1"}))
+            update = candidate()
+            update["previous_state"] = updater.catalog_state(target)
+            updater.materialize([update], root)
+            self.assertEqual(json.loads((target / "config.json").read_text())["version"], "1.0.0")
+            self.assertEqual(json.loads((target / ".publication.json").read_text())["revision"], SHA)
+
+
 class PreparationTests(unittest.TestCase):
     def prepare(self, fetch):
-        with patch.object(updater.subprocess, "run"):
-            return updater.prepare_channel("stable", fetch)
+        with tempfile.TemporaryDirectory() as root, patch.object(updater, "inspect_image", side_effect=FakeImages()):
+            return updater.prepare_channel("stable", fetch, Path(root))
 
     def test_full_preparation_and_materialization(self):
         update = self.prepare(FakeAPI())
@@ -102,9 +260,10 @@ class PreparationTests(unittest.TestCase):
 
     def test_prepares_edge_and_beta_versions(self):
         fetch = FakeAPI()
-        with patch.object(updater.subprocess, "run"):
+        with patch.object(updater, "inspect_image", side_effect=FakeImages(SHA[:7])):
             self.assertEqual(updater.prepare_channel("edge", fetch)["version"], SHA[:7])
-            fetch.release.update(tag_name="v1.0.0-rc.1", prerelease=True)
+        fetch.release.update(tag_name="v1.0.0-rc.1", prerelease=True)
+        with patch.object(updater, "inspect_image", side_effect=FakeImages("1.0.0-rc.1")):
             self.assertEqual(updater.prepare_channel("beta", fetch)["version"], "1.0.0-rc.1")
 
     def test_source_symlink_rejected_before_any_blob_read(self):
@@ -142,7 +301,7 @@ class PreparationTests(unittest.TestCase):
             self.prepare(fetch)
 
     def test_missing_image_blocks_update(self):
-        with patch.object(updater.subprocess, "run", side_effect=updater.subprocess.CalledProcessError(1, ["docker"])):
+        with patch.object(updater, "inspect_image", side_effect=updater.subprocess.CalledProcessError(1, ["docker"])):
             with self.assertRaises(updater.subprocess.CalledProcessError):
                 updater.prepare_channel("stable", FakeAPI())
 
@@ -230,3 +389,4 @@ class WorkflowBoundaryTests(unittest.TestCase):
                 self.assertNotIn("pip", step["run"])
         self.assertNotIn("secrets.UPDATER_TOKEN", json.dumps(workflow))
         self.assertNotIn("pip install", json.dumps(publisher))
+        self.assertIn("chore(catalog): update published Traefik entries", json.dumps(publisher))
