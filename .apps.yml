@@ -1,5 +1,5 @@
 ---
-# The stable manifest also works with the unmodified community repository-updater CLI.
+# Catalog channel mappings; the data-only preparer validates the source/targets.
 channel: stable
 apps:
   traefik:
@@ -8,7 +8,7 @@ apps:
     image: ghcr.io/pheelee/traefik/{arch}
 
 # Keep this catalog's existing stable/beta installation URLs and add an edge entry.
-# The workflow adapter selects one of these manifests for the community updater.
+# No source code or documentation template is executed by the catalog updater.
 channels:
   stable:
     traefik:
