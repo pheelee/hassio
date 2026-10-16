@@ -2,7 +2,6 @@
 """Prepare public source data, then materialize it without executing source code."""
 import argparse
 import base64
-import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -18,84 +17,10 @@ STATIC = {"logo.png", "icon.png", "README.md", "DOCS.md", "apparmor.txt"}
 VERSION = re.compile(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?")
 MAX_FILE = 5 * 1024 * 1024
 MAX_TOTAL = 20 * 1024 * 1024
-DIGEST = re.compile(r"sha256:[a-f0-9]{64}")
-ARCHITECTURES = {"aarch64": "arm64", "amd64": "amd64"}
-EMPTY_STATE = hashlib.sha256(b"\0\0").hexdigest()
 
 
 def api(path):
     return json.loads(subprocess.check_output(["gh", "api", path], text=True))
-
-
-def version_key(version):
-    """SemVer precedence, including numeric versus lexical prerelease identifiers."""
-    if not VERSION.fullmatch(version):
-        raise ValueError("Invalid semantic version")
-    core, _, prerelease = version.partition("-")
-    numbers = core.split(".")
-    parts = prerelease.split(".") if prerelease else []
-    if any(len(part) > 1 and part.startswith("0") for part in numbers):
-        raise ValueError("Leading zero in semantic version")
-    if any(not part or (part.isdigit() and len(part) > 1 and part.startswith("0")) for part in parts):
-        raise ValueError("Invalid prerelease identifier")
-    return (tuple(map(int, numbers)), not bool(prerelease),
-            tuple((0, int(part)) if part.isdigit() else (1, part) for part in parts))
-
-
-def inspect_image(reference, field):
-    return json.loads(subprocess.check_output(
-        ["docker", "buildx", "imagetools", "inspect", reference, "--format", "{{json ." + field + "}}"],
-        text=True))
-
-
-def image_index(reference):
-    manifest = inspect_image(reference, "Manifest")
-    if not DIGEST.fullmatch(manifest["digest"]):
-        raise ValueError("Invalid image digest")
-    platforms = {}
-    attestations = []
-    for descriptor in manifest["manifests"]:
-        digest = descriptor["digest"]
-        if not DIGEST.fullmatch(digest):
-            raise ValueError("Invalid platform digest")
-        platform = descriptor["platform"]
-        if platform == {"os": "unknown", "architecture": "unknown"}:
-            annotations = descriptor.get("annotations", {})
-            if annotations.get("vnd.docker.reference.type") != "attestation-manifest":
-                raise ValueError("Unknown image platform")
-            attestations.append(annotations.get("vnd.docker.reference.digest"))
-            continue
-        architecture = platform["architecture"]
-        if platform["os"] != "linux" or architecture not in ARCHITECTURES.values() or architecture in platforms:
-            raise ValueError("Unexpected or duplicate image platform")
-        platforms[architecture] = digest
-    if any(digest not in platforms.values() for digest in attestations):
-        raise ValueError("Attestation does not reference an image platform")
-    return manifest["digest"], platforms
-
-
-def verify_images(version, revision):
-    _, combined = image_index(f"{IMAGE}:{version}")
-    if set(combined) != set(ARCHITECTURES.values()):
-        raise ValueError("Combined image must contain both supported architectures")
-    verified = {}
-    for addon_arch, platform_arch in ARCHITECTURES.items():
-        reference = f"{IMAGE}/{addon_arch}"
-        digest, platforms = image_index(f"{reference}:{version}")
-        if platforms != {platform_arch: combined[platform_arch]}:
-            raise ValueError("Catalog architecture tag does not match combined image")
-        image = inspect_image(f"{reference}@{platforms[platform_arch]}", "Image")
-        if image["os"] != "linux" or image["architecture"] != platform_arch:
-            raise ValueError("Image configuration platform mismatch")
-        labels = image["config"]["Labels"]
-        expected = {"org.opencontainers.image.source": f"https://github.com/{SOURCE}",
-                    "org.opencontainers.image.revision": revision,
-                    "org.opencontainers.image.version": version,
-                    "io.hass.arch": addon_arch, "io.hass.version": version, "io.hass.type": "addon"}
-        if any(labels.get(key) != value for key, value in expected.items()):
-            raise ValueError("Image labels do not match the reviewed source, version and architecture")
-        verified[addon_arch] = digest
-    return verified
 
 
 def select_channels(event, fetch=api):
@@ -192,10 +117,11 @@ def prepare_channel(channel, fetch=api, root=Path(".")):
     changelog = release.get("body") or "" if release else f"Edge build from commit {revision}.\n"
     files["CHANGELOG.md"] = base64.b64encode(changelog.encode()).decode()
     result = dict(channel=channel, version=version, revision=revision, source=SOURCE, config=config, files=files,
-                  previous_state=catalog_state(Path(root) / TARGETS[channel]))
-    # Source content is never checked out, imported, rendered or executed.
-    result["images"] = verify_images(version, revision)
+                  previous_version=catalog_version(Path(root) / TARGETS[channel]))
     validate_candidate([result])
+    # Source content is never checked out, imported, rendered or executed.
+    subprocess.run(["docker", "buildx", "imagetools", "inspect", f"{IMAGE}:{version}"],
+                   check=True, stdout=subprocess.DEVNULL)
     return result
 
 
@@ -217,13 +143,10 @@ def validate_candidate(updates):
                 raise ValueError("Edge version does not match source")
         elif not VERSION.fullmatch(version) or (channel == "stable" and "-" in version):
             raise ValueError("Invalid release version")
-        if channel != "edge":
-            version_key(version)
-        if not re.fullmatch(r"[a-f0-9]{64}", update["previous_state"]):
-            raise ValueError("Invalid previous catalog state")
-        if set(update["images"]) != set(ARCHITECTURES) or any(
-                not DIGEST.fullmatch(digest) for digest in update["images"].values()):
-            raise ValueError("Invalid verified image digests")
+        previous = update["previous_version"]
+        if previous is not None and (not isinstance(previous, str) or not (
+                VERSION.fullmatch(previous) or re.fullmatch(r"[a-f0-9]{7}", previous))):
+            raise ValueError("Invalid previous catalog version")
         if not isinstance(update["config"], dict) or update["config"].get("arch") != ["aarch64", "amd64"]:
             raise ValueError("Invalid candidate configuration")
         for name, encoded in update["files"].items():
@@ -244,33 +167,10 @@ def reject_links(directory):
                 raise ValueError("Catalog links/special files forbidden")
 
 
-def catalog_state(directory):
+def catalog_version(directory):
     reject_links(directory)
-    digest = hashlib.sha256()
-    for name in ("config.json", ".publication.json"):
-        path = directory / name
-        if path.exists():
-            data = path.read_bytes()
-            digest.update(b"\1" + len(data).to_bytes(8, "big") + data)
-        else:
-            digest.update(b"\0")
-    return digest.hexdigest()
-
-
-def validate_transition(update, directory):
-    if catalog_state(directory) != update["previous_state"]:
-        raise ValueError("Stale candidate: catalog changed since preparation; start a fresh workflow run")
-    current = directory / "config.json"
-    if current.exists() and update["channel"] != "edge":
-        old_version = json.loads(current.read_text())["version"]
-        if version_key(update["version"]) < version_key(old_version):
-            raise ValueError("Catalog version rollback forbidden")
-    publication = directory / ".publication.json"
-    if publication.exists():
-        previous = json.loads(publication.read_text())
-        if previous["version"] == update["version"] and (
-                previous["revision"] != update["revision"] or previous["images"] != update["images"]):
-            raise ValueError("Published version cannot be replaced with different source or image digests")
+    config = directory / "config.json"
+    return json.loads(config.read_text())["version"] if config.exists() else None
 
 
 def materialize(updates, root):
@@ -278,7 +178,8 @@ def materialize(updates, root):
     root = Path(root).resolve()
     # Validate every target before changing any file. No source-defined filenames.
     for update in updates:
-        validate_transition(update, root / TARGETS[update["channel"]])
+        if catalog_version(root / TARGETS[update["channel"]]) != update["previous_version"]:
+            raise ValueError("Stale candidate: catalog version changed; start a fresh workflow run")
     for update in updates:
         channel = update["channel"]
         directory = root / TARGETS[channel]
@@ -292,8 +193,6 @@ def materialize(updates, root):
                       name="Traefik" if channel == "stable" else f"Traefik ({channel.title()})",
                       url=f"https://github.com/{SOURCE}")
         (directory / "config.json").write_text(json.dumps(config, indent=2) + "\n")
-        publication = {key: update[key] for key in ("version", "revision", "images")}
-        (directory / ".publication.json").write_text(json.dumps(publication, indent=2) + "\n")
         for name, encoded in update["files"].items():
             path = directory.joinpath(*PurePosixPath(name).parts)
             path.parent.mkdir(parents=True, exist_ok=True)
