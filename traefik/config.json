@@ -3,6 +3,7 @@
     "version": "0.5.1",
     "slug": "traefik",
     "description": "Reverse Proxy for Web Services",
+    "url": "https://github.com/pheelee/hassio-addon-traefik",
     "arch": ["armv7", "aarch64", "amd64"],
     "startup": "system",
     "boot": "auto",

@@ -1,0 +1,27 @@
+---
+# The stable manifest also works with the unmodified community repository-updater CLI.
+channel: stable
+apps:
+  traefik:
+    repository: pheelee/hassio-addon-traefik
+    target: traefik
+    image: ghcr.io/pheelee/traefik/{arch}
+
+# Keep this catalog's existing stable/beta installation URLs and add an edge entry.
+# The workflow adapter selects one of these manifests for the community updater.
+channels:
+  stable:
+    traefik:
+      repository: pheelee/hassio-addon-traefik
+      target: traefik
+      image: ghcr.io/pheelee/traefik/{arch}
+  beta:
+    traefik-beta:
+      repository: pheelee/hassio-addon-traefik
+      target: traefik
+      image: ghcr.io/pheelee/traefik/{arch}
+  edge:
+    traefik-edge:
+      repository: pheelee/hassio-addon-traefik
+      target: traefik
+      image: ghcr.io/pheelee/traefik/{arch}

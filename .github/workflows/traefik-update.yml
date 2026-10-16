@@ -1,0 +1,45 @@
+---
+name: Update Traefik catalog
+
+# yamllint disable-line rule:truthy
+on:
+  repository_dispatch:
+    types: [update]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Catalog channel to refresh
+        type: choice
+        options: [stable, beta, edge]
+        default: stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: traefik-catalog-updater
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install community repository updater
+        run: python -m pip install -r scripts/requirements.txt
+      - name: Update published Traefik entries
+        env:
+          UPDATER_TOKEN: ${{ secrets.UPDATER_TOKEN }}
+          GIT_AUTHOR_NAME: pheelee
+          GIT_AUTHOR_EMAIL: pri@irbe.ch
+          GIT_COMMITTER_NAME: pheelee
+          GIT_COMMITTER_EMAIL: pri@irbe.ch
+        run: |
+          test -n "$UPDATER_TOKEN" || { echo 'Configure the UPDATER_TOKEN repository secret.' >&2; exit 1; }
+          python scripts/update-traefik.py
