@@ -52,11 +52,13 @@ class CatalogRepository(Repository):
     def update_app(self, app):
         app.update()
         if app.channel != "stable":
-            path = Path(self.git_repo.working_dir) / app.repository_target / "config.json"
-            config = json.loads(path.read_text())
+            directory = Path(self.git_repo.working_dir) / app.repository_target
+            path = next(path for path in (directory / "config.yaml", directory / "config.json") if path.exists())
+            config = yaml.safe_load(path.read_text())
             config["slug"] = app.repository_target
             config["name"] = f"Traefik ({app.channel.title()})"
-            path.write_text(json.dumps(config, indent=2) + "\n")
+            path.write_text((json.dumps(config, indent=2) + "\n") if path.suffix == ".json"
+                            else yaml.safe_dump(config, sort_keys=False))
         return self.commit_changes(f"Update {app.repository_target} to {app.current_version}")
 
     def generate_readme(self):
