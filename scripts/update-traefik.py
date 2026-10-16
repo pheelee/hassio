@@ -9,6 +9,7 @@ import subprocess
 import yaml
 from repositoryupdater.github import GitHub
 from repositoryupdater.app import App
+from github.GithubException import UnknownObjectException
 from repositoryupdater.repository import Repository
 
 SOURCE = "pheelee/hassio-addon-traefik"
@@ -36,6 +37,19 @@ def select_channels(event, github):
     return ["beta"] if release.prerelease else ["stable", "beta"]
 
 
+class CatalogApp(App):
+    def _App__load_current_info(self):
+        try:
+            super()._App__load_current_info()
+        except UnknownObjectException:
+            # This pre-existing catalog beta was published without a source tag.
+            # Keep its installed version; only update after a real new image exists.
+            if self.repository_target != "traefik-beta" or self.current_version != "0.5.2":
+                raise
+            self.current_commit = None
+            print("Legacy beta 0.5.2 has no source tag; awaiting a verified replacement.")
+
+
 class CatalogRepository(Repository):
     def __init__(self, *args, channel, **kwargs):
         super().__init__(*args, **kwargs)
@@ -45,7 +59,7 @@ class CatalogRepository(Repository):
         manifest = yaml.safe_load(self.github_repository.get_contents(".apps.yml").decoded_content)
         self.channel = self.selected_channel
         for target, config in manifest["channels"][self.channel].items():
-            self.apps.append(App(self.github, self.git_repo, target, config["image"],
+            self.apps.append(CatalogApp(self.github, self.git_repo, target, config["image"],
                                  self.github.get_repo(config["repository"]),
                                  config["target"], self.channel, True))
 

@@ -5,7 +5,7 @@ import json
 import tempfile
 from types import SimpleNamespace
 import yaml
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("updater", Path(__file__).resolve().parents[1] / "scripts/update-traefik.py")
 updater = importlib.util.module_from_spec(spec)
@@ -79,3 +79,22 @@ class LibraryIntegrationTests(unittest.TestCase):
                 self.assertEqual(result["slug"], target)
                 self.assertEqual(result["version"], "0.5.5")
                 self.assertEqual(result["image"], "ghcr.io/pheelee/traefik/{arch}")
+
+
+class LegacyCatalogTests(unittest.TestCase):
+    def test_legacy_beta_without_source_tag_can_migrate(self):
+        app = object.__new__(updater.CatalogApp)
+        app.repository_target = "traefik-beta"
+        app.current_version = "0.5.2"
+        with patch.object(updater.App, "_App__load_current_info", side_effect=updater.UnknownObjectException(404, {})):
+            app._App__load_current_info()
+        self.assertIsNone(app.current_commit)
+        self.assertEqual(app.current_version, "0.5.2")
+
+    def test_other_missing_tags_still_fail(self):
+        app = object.__new__(updater.CatalogApp)
+        app.repository_target = "traefik"
+        app.current_version = "0.5.5"
+        with patch.object(updater.App, "_App__load_current_info", side_effect=updater.UnknownObjectException(404, {})):
+            with self.assertRaises(updater.UnknownObjectException):
+                app._App__load_current_info()
