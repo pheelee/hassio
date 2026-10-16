@@ -1,0 +1,82 @@
+---
+name: Update Traefik catalog
+
+# yamllint disable-line rule:truthy
+on:
+  repository_dispatch:
+    types: [update]
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Catalog channel to refresh
+        type: choice
+        options: [stable, beta, edge]
+        default: stable
+
+permissions: {}
+
+concurrency:
+  group: traefik-catalog-updater
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install read-only preparation dependency
+        run: python -m pip install -r scripts/requirements.txt
+      - name: Prepare validated public source data
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/update-traefik.py prepare /tmp/candidate.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: traefik-candidate
+          path: /tmp/candidate.json
+          retention-days: 1
+  publish:
+    needs: prepare
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: main
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: traefik-candidate
+          path: ${{ runner.temp }}/traefik-candidate
+      - name: Materialize data without credentials or third-party Python packages
+        env:
+          CANDIDATE: ${{ runner.temp }}/traefik-candidate/candidate.json
+        run: python3 -I scripts/update-traefik.py materialize "$CANDIDATE"
+      - name: Commit allowed catalog changes
+        run: |
+          git add --all -- traefik traefik-beta
+          if test -d traefik-edge; then git add --all -- traefik-edge; fi
+          if git diff --cached --quiet; then exit 0; fi
+          git -c core.hooksPath=/dev/null -c user.name=pheelee -c user.email=pri@irbe.ch \
+            commit --no-gpg-sign -m 'Update published Traefik catalog entries'
+      - name: Push with the short-lived repository token
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # No source content, package installation or template rendering in this step.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=http.https://github.com/.extraheader
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $auth"
+          git -c core.hooksPath=/dev/null push origin HEAD:main

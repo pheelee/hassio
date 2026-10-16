@@ -1,0 +1,27 @@
+---
+# Catalog channel mappings; the data-only preparer validates the source/targets.
+channel: stable
+apps:
+  traefik:
+    repository: pheelee/hassio-addon-traefik
+    target: traefik
+    image: ghcr.io/pheelee/traefik/{arch}
+
+# Keep this catalog's existing stable/beta installation URLs and add an edge entry.
+# No source code or documentation template is executed by the catalog updater.
+channels:
+  stable:
+    traefik:
+      repository: pheelee/hassio-addon-traefik
+      target: traefik
+      image: ghcr.io/pheelee/traefik/{arch}
+  beta:
+    traefik-beta:
+      repository: pheelee/hassio-addon-traefik
+      target: traefik
+      image: ghcr.io/pheelee/traefik/{arch}
+  edge:
+    traefik-edge:
+      repository: pheelee/hassio-addon-traefik
+      target: traefik
+      image: ghcr.io/pheelee/traefik/{arch}
