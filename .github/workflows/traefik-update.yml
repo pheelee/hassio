@@ -69,7 +69,7 @@ jobs:
           if test -d traefik-edge; then git add --all -- traefik-edge; fi
           if git diff --cached --quiet; then exit 0; fi
           git -c core.hooksPath=/dev/null -c user.name=pheelee -c user.email=pri@irbe.ch \
-            commit --no-gpg-sign -m 'Update published Traefik catalog entries'
+            commit --no-gpg-sign -m 'chore(catalog): update published Traefik entries'
       - name: Push with the short-lived repository token
         env:
           GH_TOKEN: ${{ github.token }}

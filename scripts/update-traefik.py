@@ -82,7 +82,7 @@ def blob(entry, fetch):
     return result
 
 
-def prepare_channel(channel, fetch=api):
+def prepare_channel(channel, fetch=api, root=Path(".")):
     # PyYAML is used only in the read-only preparation job, never in publishing.
     import yaml
 
@@ -116,7 +116,8 @@ def prepare_channel(channel, fetch=api):
              for name, entry in entries.items() if asset_path(name)}
     changelog = release.get("body") or "" if release else f"Edge build from commit {revision}.\n"
     files["CHANGELOG.md"] = base64.b64encode(changelog.encode()).decode()
-    result = dict(channel=channel, version=version, revision=revision, source=SOURCE, config=config, files=files)
+    result = dict(channel=channel, version=version, revision=revision, source=SOURCE, config=config, files=files,
+                  previous_version=catalog_version(Path(root) / TARGETS[channel]))
     validate_candidate([result])
     # Source content is never checked out, imported, rendered or executed.
     subprocess.run(["docker", "buildx", "imagetools", "inspect", f"{IMAGE}:{version}"],
@@ -142,6 +143,10 @@ def validate_candidate(updates):
                 raise ValueError("Edge version does not match source")
         elif not VERSION.fullmatch(version) or (channel == "stable" and "-" in version):
             raise ValueError("Invalid release version")
+        previous = update["previous_version"]
+        if previous is not None and (not isinstance(previous, str) or not (
+                VERSION.fullmatch(previous) or re.fullmatch(r"[a-f0-9]{7}", previous))):
+            raise ValueError("Invalid previous catalog version")
         if not isinstance(update["config"], dict) or update["config"].get("arch") != ["aarch64", "amd64"]:
             raise ValueError("Invalid candidate configuration")
         for name, encoded in update["files"].items():
@@ -162,12 +167,19 @@ def reject_links(directory):
                 raise ValueError("Catalog links/special files forbidden")
 
 
+def catalog_version(directory):
+    reject_links(directory)
+    config = directory / "config.json"
+    return json.loads(config.read_text())["version"] if config.exists() else None
+
+
 def materialize(updates, root):
     validate_candidate(updates)
     root = Path(root).resolve()
     # Validate every target before changing any file. No source-defined filenames.
     for update in updates:
-        reject_links(root / TARGETS[update["channel"]])
+        if catalog_version(root / TARGETS[update["channel"]]) != update["previous_version"]:
+            raise ValueError("Stale candidate: catalog version changed; start a fresh workflow run")
     for update in updates:
         channel = update["channel"]
         directory = root / TARGETS[channel]

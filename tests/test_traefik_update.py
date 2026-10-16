@@ -20,7 +20,7 @@ def candidate(channel="stable"):
     return dict(channel=channel, source=updater.SOURCE, revision=SHA,
                 version=SHA[:7] if channel == "edge" else "1.0.0",
                 config={"arch": ["aarch64", "amd64"], "version": "dev", "slug": "../../escape"},
-                files={"README.md": base64.b64encode(TEMPLATE.encode()).decode()})
+                files={"README.md": base64.b64encode(TEMPLATE.encode()).decode()}, previous_version=None)
 
 
 class FakeAPI:
@@ -89,8 +89,8 @@ class DispatchTests(unittest.TestCase):
 
 class PreparationTests(unittest.TestCase):
     def prepare(self, fetch):
-        with patch.object(updater.subprocess, "run"):
-            return updater.prepare_channel("stable", fetch)
+        with tempfile.TemporaryDirectory() as root, patch.object(updater.subprocess, "run"):
+            return updater.prepare_channel("stable", fetch, Path(root))
 
     def test_full_preparation_and_materialization(self):
         update = self.prepare(FakeAPI())
@@ -148,6 +148,39 @@ class PreparationTests(unittest.TestCase):
 
 
 class MaterializationTests(unittest.TestCase):
+    def test_stale_release_and_edge_candidates_cannot_replace_newer_entries(self):
+        for channel in ("stable", "edge"):
+            with self.subTest(channel=channel), tempfile.TemporaryDirectory() as root:
+                stale = candidate(channel)
+                current = candidate(channel)
+                current.update(revision="b" * 40, version="bbbbbbb" if channel == "edge" else "2.0.0")
+                updater.materialize([current], root)
+                config = Path(root) / updater.TARGETS[channel] / "config.json"
+                before = config.read_bytes()
+                with self.assertRaisesRegex(ValueError, "Stale candidate"):
+                    updater.materialize([stale], root)
+                self.assertEqual(config.read_bytes(), before)
+
+    def test_all_channels_are_checked_before_any_files_change(self):
+        with tempfile.TemporaryDirectory() as root:
+            updater.materialize([candidate("beta")], root)
+            with self.assertRaisesRegex(ValueError, "Stale candidate"):
+                updater.materialize([candidate(), candidate("beta")], root)
+            self.assertFalse((Path(root) / "traefik").exists())
+
+    def test_preparation_captures_existing_version_and_fresh_repeat_is_allowed(self):
+        with tempfile.TemporaryDirectory() as root, patch.object(updater.subprocess, "run"):
+            target = Path(root) / "traefik"
+            target.mkdir()
+            (target / "config.json").write_text(json.dumps({"version": "0.5.1"}))
+            update = updater.prepare_channel("stable", FakeAPI(), Path(root))
+            self.assertEqual(update["previous_version"], "0.5.1")
+            updater.materialize([update], root)
+            fresh = updater.prepare_channel("stable", FakeAPI(), Path(root))
+            self.assertEqual(fresh["previous_version"], "1.0.0")
+            updater.materialize([fresh], root)
+            self.assertFalse((target / ".publication.json").exists())
+
     def test_templates_are_literal_and_token_is_not_copied(self):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"UPDATER_TOKEN": "synthetic-secret"}):
             updater.materialize([candidate()], root)
@@ -230,3 +263,4 @@ class WorkflowBoundaryTests(unittest.TestCase):
                 self.assertNotIn("pip", step["run"])
         self.assertNotIn("secrets.UPDATER_TOKEN", json.dumps(workflow))
         self.assertNotIn("pip install", json.dumps(publisher))
+        self.assertIn("chore(catalog): update published Traefik entries", json.dumps(publisher))
