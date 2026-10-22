@@ -1,6 +1,6 @@
 {
   "name": "Traefik (Edge)",
-  "version": "da252d1",
+  "version": "b8d1d28",
   "slug": "traefik-edge",
   "description": "Reverse Proxy for Web Services",
   "arch": [
